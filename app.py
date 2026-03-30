@@ -35,7 +35,31 @@ db = firestore.client()
 @app.route("/")
 def home():
     return "FreshMart API running 🚀"
+@app.route("/owner/login", methods=["POST"])
+def owner_login():
+    data = request.json or {}
+    mobile = (data.get("mobile") or "").strip()
+    password = (data.get("password") or "").strip()
 
+    owner_ref = db.collection("owners").document(mobile)
+    owner_doc = owner_ref.get()
+
+    if not owner_doc.exists:
+        return jsonify({"status": "error", "message": "Owner not found"}), 404
+
+    owner_data = owner_doc.to_dict()
+
+    if owner_data.get("password") != password:
+        return jsonify({"status": "error", "message": "Invalid password"}), 401
+
+    return jsonify({
+        "status": "success",
+        "owner": {
+            "mobile": mobile,
+            "name": owner_data.get("name"),
+            "shop": owner_data.get("shopName")
+        }
+    })
 # ─────────────────────────────────────────────
 # CORS
 # ─────────────────────────────────────────────
