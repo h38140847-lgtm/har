@@ -3,19 +3,17 @@ import os
 import uuid
 from datetime import datetime, UTC
 
-from flask import Flask, jsonify, make_response, request
+from flask import Flask, jsonify, request
 from flask_cors import CORS
 
 import firebase_admin
 from firebase_admin import credentials, firestore, messaging
-from google.cloud.firestore import ArrayUnion
-from google.cloud.firestore_v1.base_query import FieldFilter
 
 app = Flask(__name__)
 CORS(app)
 
 # ─────────────────────────────────────────────
-# FIREBASE INIT (Railway ENV supported)
+# FIREBASE INIT
 # ─────────────────────────────────────────────
 if not firebase_admin._apps:
     firebase_config = os.environ.get("FIREBASE_KEY")
@@ -23,7 +21,7 @@ if not firebase_admin._apps:
     if firebase_config:
         cred = credentials.Certificate(json.loads(firebase_config))
     else:
-        cred = credentials.Certificate("serviceAccountKey.json")  # local only
+        cred = credentials.Certificate("serviceAccountKey.json")
 
     firebase_admin.initialize_app(cred)
 
@@ -35,6 +33,11 @@ db = firestore.client()
 @app.route("/")
 def home():
     return "FreshMart API running 🚀"
+
+
+# ─────────────────────────────────────────────
+# OWNER LOGIN
+# ─────────────────────────────────────────────
 @app.route("/owner/login", methods=["POST"])
 def owner_login():
     data = request.json or {}
@@ -60,152 +63,121 @@ def owner_login():
             "shop": owner_data.get("shopName")
         }
     })
-# ─────────────────────────────────────────────
-# CORS
-# ─────────────────────────────────────────────
-@app.after_request
-def add_cors_headers(response):
-    origin = request.headers.get("Origin")
-    response.headers["Access-Control-Allow-Origin"] = origin or "*"
-    response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
-    response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
-    return response
 
-@app.route("/<path:_path>", methods=["OPTIONS"])
-def generic_preflight(_path):
-    return make_response("", 204)
 
 # ─────────────────────────────────────────────
-# HELPERS
+# SAVE FCM TOKEN
 # ─────────────────────────────────────────────
-def normalise_unit(unit_value, unit_type):
+@app.route("/owner/save-fcm-token", methods=["POST"])
+def save_fcm_token():
+    data = request.json or {}
+    mobile = data.get("mobile")
+    token = data.get("fcmToken")
+
+    if not mobile or not token:
+        return jsonify({"status": "error"}), 400
+
+    db.collection("owners").document(mobile).update({
+        "fcmToken": token
+    })
+
+    return jsonify({"status": "success"})
+
+
+# ─────────────────────────────────────────────
+# SEND NOTIFICATION FUNCTION
+# ─────────────────────────────────────────────
+def send_notification(title, body):
     try:
-        v = float(unit_value)
-    except:
-        return unit_value, unit_type
+        for owner in db.collection("owners").stream():
+            token = owner.to_dict().get("fcmToken")
 
-    ut = (unit_type or "").lower()
-    if ut == "kg":
-        return v * 1000, "g"
-    if ut == "l":
-        return v * 1000, "ml"
-    return v, unit_type
-
-
-def send_order_notification(order_id, mobile, total):
-    try:
-        for owner_doc in db.collection("owners").stream():
-            token = owner_doc.to_dict().get("fcmToken")
             if not token:
                 continue
 
             message = messaging.Message(
                 notification=messaging.Notification(
-                    title="New Order",
-                    body=f"Order #{order_id} Rs.{total} from {mobile}"
+                    title=title,
+                    body=body
                 ),
                 token=token,
             )
+
             messaging.send(message)
+
     except Exception as e:
-        print("FCM Error:", e)
-
-# ─────────────────────────────────────────────
-# AUTH
-# ─────────────────────────────────────────────
-@app.route("/register", methods=["POST"])
-def register():
-    data = request.json or {}
-    mobile = data.get("mobile")
-    name = data.get("name")
-
-    if not mobile or not name:
-        return jsonify({"error": "missing data"}), 400
-
-    ref = db.collection("users").document(mobile)
-
-    if ref.get().exists:
-        return jsonify({"error": "already exists"}), 409
-
-    ref.set({
-        "name": name,
-        "mobile": mobile,
-        "approved": False,
-        "createdAt": datetime.now(UTC)
-    })
-
-    return jsonify({"message": "registered"}), 201
-
-
-@app.route("/login", methods=["POST"])
-def login():
-    mobile = request.json.get("mobile")
-
-    doc = db.collection("users").document(mobile).get()
-
-    if not doc.exists:
-        return jsonify({"error": "not found"}), 404
-
-    return jsonify(doc.to_dict())
+        print("FCM ERROR:", e)
 
 
 # ─────────────────────────────────────────────
-# PRODUCTS
-# ─────────────────────────────────────────────
-@app.route("/products", methods=["GET"])
-def products():
-    result = []
-    for doc in db.collection("products").stream():
-        d = doc.to_dict()
-        d["id"] = doc.id
-        result.append(d)
-    return jsonify(result)
-
-
-@app.route("/owner/add-product", methods=["POST"])
-def add_product():
-    data = request.json or {}
-
-    value, unit = normalise_unit(data.get("unitValue"), data.get("unitType"))
-
-    db.collection("products").add({
-        "name": data.get("name"),
-        "price": float(data.get("price")),
-        "quantity": int(data.get("quantity")),
-        "unitValue": value,
-        "unitType": unit,
-        "createdAt": datetime.now(UTC)
-    })
-
-    return jsonify({"message": "added"})
-
-
-# ─────────────────────────────────────────────
-# ORDER
+# PLACE ORDER
 # ─────────────────────────────────────────────
 @app.route("/customer/place-order", methods=["POST"])
 def place_order():
     data = request.json or {}
 
+    mobile = data.get("mobile")
+    items = data.get("items")
+    total = data.get("totalPrice")
+
+    if not mobile or not items:
+        return jsonify({"status": "error"}), 400
+
     order_id = str(uuid.uuid4())[:8]
 
     db.collection("orders").add({
         "orderId": order_id,
-        "mobile": data.get("mobile"),
-        "items": data.get("items"),
-        "totalPrice": data.get("totalPrice"),
+        "mobile": mobile,
+        "items": items,
+        "totalPrice": total,
         "status": "Pending",
         "createdAt": datetime.now(UTC)
     })
 
-    send_order_notification(order_id, data.get("mobile"), data.get("totalPrice"))
+    # 🔔 SEND NOTIFICATION
+    send_notification(
+        "🛒 New Order Received!",
+        f"Order #{order_id} from {mobile}"
+    )
 
-    return jsonify({"orderId": order_id})
+    return jsonify({
+        "status": "success",
+        "orderId": order_id
+    })
 
 
 # ─────────────────────────────────────────────
-# RUN (RAILWAY FIX)
+# GET ORDERS (OWNER)
+# ─────────────────────────────────────────────
+@app.route("/owner/orders", methods=["GET"])
+def get_orders():
+    result = []
+    for doc in db.collection("orders").stream():
+        d = doc.to_dict()
+        d["id"] = doc.id
+        result.append(d)
+
+    return jsonify(result)
+
+
+# ─────────────────────────────────────────────
+# UPDATE ORDER STATUS
+# ─────────────────────────────────────────────
+@app.route("/owner/order/<order_id>/status", methods=["PUT"])
+def update_status(order_id):
+    data = request.json or {}
+    status = data.get("status")
+
+    db.collection("orders").document(order_id).update({
+        "status": status
+    })
+
+    return jsonify({"status": "success"})
+
+
+# ─────────────────────────────────────────────
+# RUN (RAILWAY)
 # ─────────────────────────────────────────────
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))  # IMPORTANT
+    port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
