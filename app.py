@@ -24,6 +24,7 @@ logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("freshmart")
 FCM_ANDROID_CHANNEL_ID = (os.environ.get("FCM_ANDROID_CHANNEL_ID") or "").strip()
 FCM_ANDROID_CLICK_ACTION = (os.environ.get("FCM_ANDROID_CLICK_ACTION") or "FCM_PLUGIN_ACTIVITY").strip()
+WEBPUSH_CLICK_LINK = (os.environ.get("WEBPUSH_CLICK_LINK") or "").strip()
 
 # ── Firebase init ──────────────────────────────────────────────────────────────
 if not firebase_admin._apps:
@@ -56,6 +57,10 @@ def _message_data(data: dict | None = None) -> dict:
     return {str(k): str(v) for k, v in (data or {}).items()}
 
 
+def _is_https_url(url: str) -> bool:
+    return url.startswith("https://")
+
+
 def _build_fcm_message(token: str, title: str, body: str, data: dict | None = None):
     android_notif = messaging.AndroidNotification(
         sound="default",
@@ -63,6 +68,20 @@ def _build_fcm_message(token: str, title: str, body: str, data: dict | None = No
     )
     if FCM_ANDROID_CHANNEL_ID:
         android_notif.channel_id = FCM_ANDROID_CHANNEL_ID
+
+    webpush_cfg = messaging.WebpushConfig(
+        headers={"Urgency": "high"},
+        notification=messaging.WebpushNotification(
+            title=title,
+            body=body,
+            icon="/logo192.png",
+            badge="/logo192.png",
+            tag="freshmart-order",
+            require_interaction=True,
+        ),
+    )
+    if _is_https_url(WEBPUSH_CLICK_LINK):
+        webpush_cfg.fcm_options = messaging.WebpushFCMOptions(link=WEBPUSH_CLICK_LINK)
 
     return messaging.Message(
         notification=messaging.Notification(title=title, body=body),
@@ -77,18 +96,7 @@ def _build_fcm_message(token: str, title: str, body: str, data: dict | None = No
                 aps=messaging.Aps(sound="default", badge=1)
             )
         ),
-        webpush=messaging.WebpushConfig(
-            headers={"Urgency": "high"},
-            notification=messaging.WebpushNotification(
-                title=title,
-                body=body,
-                icon="/logo192.png",
-                badge="/logo192.png",
-                tag="freshmart-order",
-                require_interaction=True,
-            ),
-            fcm_options=messaging.WebpushFCMOptions(link="/"),
-        ),
+        webpush=webpush_cfg,
         token=token,
     )
 
