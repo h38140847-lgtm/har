@@ -22,7 +22,7 @@ app = Flask(__name__)
 CORS(app)
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("freshmart")
-FCM_ANDROID_CHANNEL_ID = (os.environ.get("FCM_ANDROID_CHANNEL_ID") or "").strip()
+FCM_ANDROID_CHANNEL_ID = (os.environ.get("FCM_ANDROID_CHANNEL_ID") or "freshmart_orders").strip()
 FCM_ANDROID_CLICK_ACTION = (os.environ.get("FCM_ANDROID_CLICK_ACTION") or "FCM_PLUGIN_ACTIVITY").strip()
 WEBPUSH_CLICK_LINK = (os.environ.get("WEBPUSH_CLICK_LINK") or "").strip()
 
