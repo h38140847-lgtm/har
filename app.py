@@ -22,6 +22,8 @@ app = Flask(__name__)
 CORS(app)
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("freshmart")
+FCM_ANDROID_CHANNEL_ID = (os.environ.get("FCM_ANDROID_CHANNEL_ID") or "").strip()
+FCM_ANDROID_CLICK_ACTION = (os.environ.get("FCM_ANDROID_CLICK_ACTION") or "FCM_PLUGIN_ACTIVITY").strip()
 
 # ── Firebase init ──────────────────────────────────────────────────────────────
 if not firebase_admin._apps:
@@ -50,6 +52,47 @@ def _order_dict(doc):
     return d
 
 
+def _message_data(data: dict | None = None) -> dict:
+    return {str(k): str(v) for k, v in (data or {}).items()}
+
+
+def _build_fcm_message(token: str, title: str, body: str, data: dict | None = None):
+    android_notif = messaging.AndroidNotification(
+        sound="default",
+        click_action=FCM_ANDROID_CLICK_ACTION,
+    )
+    if FCM_ANDROID_CHANNEL_ID:
+        android_notif.channel_id = FCM_ANDROID_CHANNEL_ID
+
+    return messaging.Message(
+        notification=messaging.Notification(title=title, body=body),
+        data=_message_data(data),
+        android=messaging.AndroidConfig(
+            priority="high",
+            ttl=120,
+            notification=android_notif,
+        ),
+        apns=messaging.APNSConfig(
+            payload=messaging.APNSPayload(
+                aps=messaging.Aps(sound="default", badge=1)
+            )
+        ),
+        webpush=messaging.WebpushConfig(
+            headers={"Urgency": "high"},
+            notification=messaging.WebpushNotification(
+                title=title,
+                body=body,
+                icon="/logo192.png",
+                badge="/logo192.png",
+                tag="freshmart-order",
+                require_interaction=True,
+            ),
+            fcm_options=messaging.WebpushFCMOptions(link="/"),
+        ),
+        token=token,
+    )
+
+
 def send_push(title: str, body: str, data: dict = None):
     """Send FCM push to ALL owner tokens stored in the owners collection."""
     sent = 0
@@ -59,41 +102,17 @@ def send_push(title: str, body: str, data: dict = None):
         if not token:
             continue
         try:
-            msg = messaging.Message(
-                notification=messaging.Notification(title=title, body=body),
-                data={str(k): str(v) for k, v in (data or {}).items()},
-                android=messaging.AndroidConfig(
-                    priority="high",
-                    notification=messaging.AndroidNotification(
-                        sound="default",
-                        channel_id="freshmart_orders",
-                    ),
-                ),
-                apns=messaging.APNSConfig(
-                    payload=messaging.APNSPayload(
-                        aps=messaging.Aps(sound="default", badge=1)
-                    )
-                ),
-                webpush=messaging.WebpushConfig(
-                    headers={"Urgency": "high"},
-                    notification=messaging.WebpushNotification(
-                        title=title,
-                        body=body,
-                        icon="/logo192.png",
-                        badge="/logo192.png",
-                        tag="freshmart-order",
-                        require_interaction=True,
-                    ),
-                    fcm_options=messaging.WebpushFCMOptions(link="/"),
-                ),
-                token=token,
-            )
+            msg = _build_fcm_message(token=token, title=title, body=body, data=data)
             messaging.send(msg)
             sent += 1
         except Exception as e:
-            err = str(e)
+            err = str(e).lower()
             logger.warning("[FCM] send failed for token %s...: %s", token[:20], err)
-            if "registration-token-not-registered" in err or "Requested entity was not found" in err:
+            if (
+                "registration-token-not-registered" in err
+                or "requested entity was not found" in err
+                or "unregistered" in err
+            ):
                 owner_doc.reference.update({"fcmToken": firestore.DELETE_FIELD})
                 invalid_tokens += 1
     logger.info("[FCM] Sent to %s owner(s), removed %s invalid token(s): %s", sent, invalid_tokens, title)
@@ -175,16 +194,15 @@ def test_notification():
                 "message": "No FCM token found. Please open the app first to register.",
             }), 400
         try:
-            msg = messaging.Message(
-                notification=messaging.Notification(title=title, body=body),
-                android=messaging.AndroidConfig(
-                    priority="high",
-                    notification=messaging.AndroidNotification(
-                        sound="default",
-                        channel_id="freshmart_orders",
-                    ),
-                ),
+            msg = _build_fcm_message(
                 token=token,
+                title=title,
+                body=body,
+                data={
+                    "type": "test_notification",
+                    "title": title,
+                    "body": body,
+                },
             )
             messaging.send(msg)
             return jsonify({"status": "success", "message": "Test notification sent!"})
