@@ -8,7 +8,7 @@ ENV VARS NEEDED:
   FIREBASE_KEY  — JSON string of serviceAccountKey.json
 """
 
-import json, os, uuid
+import json, logging, os, uuid
 from datetime import datetime, UTC
 
 from flask import Flask, jsonify, request
@@ -20,12 +20,22 @@ from google.cloud.firestore_v1.base_query import FieldFilter
 
 app = Flask(__name__)
 CORS(app)
+logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
+logger = logging.getLogger("freshmart")
 
 # ── Firebase init ──────────────────────────────────────────────────────────────
 if not firebase_admin._apps:
-    cfg = os.environ.get("FIREBASE_KEY")
-    cred = credentials.Certificate(json.loads(cfg)) if cfg else credentials.Certificate("serviceAccountKey.json")
-    firebase_admin.initialize_app(cred)
+    raw_cfg = os.environ.get("FIREBASE_KEY") or os.environ.get("FIREBASE_SERVICE_ACCOUNT")
+    try:
+        if raw_cfg:
+            cred = credentials.Certificate(json.loads(raw_cfg))
+        else:
+            cred = credentials.Certificate("serviceAccountKey.json")
+        firebase_admin.initialize_app(cred)
+        logger.info("[BOOT] Firebase Admin initialized successfully.")
+    except Exception as exc:
+        logger.exception("[BOOT] Firebase Admin initialization failed: %s", exc)
+        raise
 
 db = firestore.client()
 
@@ -43,6 +53,7 @@ def _order_dict(doc):
 def send_push(title: str, body: str, data: dict = None):
     """Send FCM push to ALL owner tokens stored in the owners collection."""
     sent = 0
+    invalid_tokens = 0
     for owner_doc in db.collection("owners").stream():
         token = owner_doc.to_dict().get("fcmToken")
         if not token:
@@ -63,13 +74,29 @@ def send_push(title: str, body: str, data: dict = None):
                         aps=messaging.Aps(sound="default", badge=1)
                     )
                 ),
+                webpush=messaging.WebpushConfig(
+                    headers={"Urgency": "high"},
+                    notification=messaging.WebpushNotification(
+                        title=title,
+                        body=body,
+                        icon="/logo192.png",
+                        badge="/logo192.png",
+                        tag="freshmart-order",
+                        require_interaction=True,
+                    ),
+                    fcm_options=messaging.WebpushFCMOptions(link="/"),
+                ),
                 token=token,
             )
             messaging.send(msg)
             sent += 1
         except Exception as e:
-            print(f"[FCM] send failed for token {token[:20]}…: {e}")
-    print(f"[FCM] Sent to {sent} owner(s): {title}")
+            err = str(e)
+            logger.warning("[FCM] send failed for token %s...: %s", token[:20], err)
+            if "registration-token-not-registered" in err or "Requested entity was not found" in err:
+                owner_doc.reference.update({"fcmToken": firestore.DELETE_FIELD})
+                invalid_tokens += 1
+    logger.info("[FCM] Sent to %s owner(s), removed %s invalid token(s): %s", sent, invalid_tokens, title)
     return sent
 
 
@@ -121,7 +148,7 @@ def save_fcm_token():
         return jsonify({"status": "error", "message": "Owner not found"}), 404
 
     ref.update({"fcmToken": token, "tokenUpdatedAt": datetime.now(UTC)})
-    print(f"[FCM] Token saved for owner {mobile}: {token[:20]}…")
+    logger.info("[FCM] Token saved for owner %s: %s...", mobile, token[:20])
     return jsonify({"status": "success", "message": "Token saved"})
 
 
@@ -318,7 +345,7 @@ def place_order():
     if len(items) > 3:
         item_names += f" +{len(items)-3} more"
 
-    send_push(
+    sent_to = send_push(
         title=f"🛒 New Order #{order_id}",
         body=f"{customer_name} ordered {item_count} item(s): {item_names} — ₹{total:.0f}",
         data={
@@ -327,11 +354,18 @@ def place_order():
             "mobile":     mobile,
             "totalPrice": str(total),
             "type":       "new_order",
+            "title":      f"New Order #{order_id}",
+            "body":       f"{customer_name} ordered {item_count} item(s)",
         },
     )
     # ───────────────────────────────────────────────────────────────────────
 
-    return jsonify({"status": "success", "orderId": order_id, "id": order_ref.id}), 201
+    logger.info(
+        "[ORDER] %s placed by %s. Amount=%s. Notification sent to %s owner(s).",
+        order_id, mobile, total, sent_to
+    )
+
+    return jsonify({"status": "success", "orderId": order_id, "id": order_ref.id, "notifiedOwners": sent_to}), 201
 
 
 # ══════════════════════════════════════════════════════════════════════════════
